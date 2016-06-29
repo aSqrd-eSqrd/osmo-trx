@@ -817,6 +817,8 @@ int uhd_device::open(const std::string &args, bool extref, bool swap_channels)
 	if (extref)
 		usrp_dev->set_clock_source("external");
 
+	usrp_dev->set_clock_source("gpsdo");
+
 	// Set rates
 	double _rx_rate = select_rate(dev_type, rx_sps, iface);
 	double _tx_rate = select_rate(dev_type, tx_sps, iface);

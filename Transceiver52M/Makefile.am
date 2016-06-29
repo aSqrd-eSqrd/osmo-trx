@@ -61,7 +61,8 @@ COMMON_SOURCES = \
 	ChannelizerBase.cpp \
 	Channelizer.cpp \
 	Synthesis.cpp \
-	common/fft.c
+	common/fft.c \
+	socket.c
 
 libtransceiver_la_SOURCES = \
 	$(COMMON_SOURCES) \

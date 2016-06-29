@@ -534,8 +534,9 @@ Transceiver::CorrType Transceiver::expectedCorrType(GSM::Time currTime,
 int Transceiver::detectBurst(signalVector &burst,
                              complex &amp, float &toa, CorrType type)
 {
-  float threshold = 5.0, rc = 0;
+  float threshold = 8.0, rc = 0;
 
+#if 0
   switch (type) {
   case EDGE:
     rc = detectEdgeBurst(burst, mTSC, threshold, mSPSRx,
@@ -549,7 +550,6 @@ int Transceiver::detectBurst(signalVector &burst,
                              amp, toa, mMaxExpectedDelayNB);
     break;
   case RACH:
-    threshold = 6.0;
     rc = detectRACHBurst(burst, threshold, mSPSRx, amp, toa,
                          mMaxExpectedDelayAB);
     break;
@@ -559,7 +559,17 @@ int Transceiver::detectBurst(signalVector &burst,
 
   if (rc > 0)
     return type;
+#else
+    rc = analyzeTrafficBurst(burst, mTSC, threshold, mSPSRx,
+                             amp, toa, mMaxExpectedDelayNB);
+    if (rc > 0)
+      return TSC;
 
+    rc = detectRACHBurst(burst, threshold, mSPSRx, amp, toa,
+                         mMaxExpectedDelayAB);
+    if (rc > 0)
+      return RACH;
+#endif
   return rc;
 }
 
@@ -611,6 +621,8 @@ SoftVector *Transceiver::pullRadioVector(GSM::Time &wTime, double &RSSI, bool &i
   /* Set time and determine correlation type */
   GSM::Time time = radio_burst->getTime();
   CorrType type = expectedCorrType(time, chan);
+
+  type = TSC;
 
   /* Debug: dump bursts to disk */
   /* bits 0-7  - chan 0 timeslots
@@ -684,6 +696,8 @@ SoftVector *Transceiver::pullRadioVector(GSM::Time &wTime, double &RSSI, bool &i
 
   bits = demodulate(*burst, amp, toa, type);
 
+  std::cout << " " << time.FN() << ", " << time.TN() << std::endl;
+
   delete radio_burst;
   return bits;
 }
@@ -723,7 +737,8 @@ void Transceiver::driveControl(size_t chan)
     LOG(WARNING) << "bogus message on control interface";
     return;
   }
-  LOG(INFO) << "command is " << buffer;
+//  LOG(INFO) << "command is " << buffer;
+  std::cout << chan << " command is " << buffer << std::endl;
 
   if (strcmp(command,"POWEROFF")==0) {
     stop();
@@ -827,7 +842,7 @@ void Transceiver::driveControl(size_t chan)
     // set TSC
     unsigned TSC;
     sscanf(buffer, "%3s %s %d", cmdcheck, command, &TSC);
-    if (mOn || (TSC < 0) || (TSC > 7))
+    if ((TSC < 0) || (TSC > 7))
       sprintf(response, "RSP SETTSC 1 %d", TSC);
     else if (chan && (TSC != mTSC))
       sprintf(response, "RSP SETTSC 1 %d", TSC);
@@ -863,6 +878,8 @@ void Transceiver::driveControl(size_t chan)
     LOG(WARNING) << "bogus command " << command << " on control interface.";
     sprintf(response,"RSP ERR 1");
   }
+
+//  std::cout << "CMD RESP: %s" << response << std::endl;
 
   mCtrlSockets[chan]->write(response, strlen(response) + 1);
 }

@@ -35,6 +35,7 @@ extern "C" {
 #include "convolve.h"
 #include "scale.h"
 #include "mult.h"
+#include "socket.h"
 }
 
 using namespace GSM;
@@ -1702,7 +1703,7 @@ static float computePeakRatio(signalVector *corr,
     }
   }
 
-  if (num < 2)
+  if (num < 5)
     return 0.0;
 
   rms = sqrtf(avg / (float) num) + 0.00001;
@@ -1736,7 +1737,7 @@ bool energyDetect(signalVector &rxBurst,
  * For higher oversampling values, we assume the energy detector is in place
  * and we run full interpolating peak detection.
  */
-static int detectBurst(signalVector &burst,
+static float detectBurst(signalVector &burst,
                        signalVector &corr, CorrelationSequence *sync,
                        float thresh, int sps, complex *amp, float *toa,
                        int start, int len)
@@ -1755,10 +1756,11 @@ static int detectBurst(signalVector &burst,
   if (!convolve(corr_in, sync->sequence, &corr,
                 CUSTOM, start, len, 1, 0)) {
     delete dec;
-    return -1;
+    return -1.0f;
   }
 
-  delete dec;
+  lte_dsock_send((float *) corr_in->begin(), corr_in->size(), 0);
+  lte_dsock_send((float *) corr.begin(), corr.size(), 1);
 
   /* Running at the downsampled rate at this point */
   sps = 1;
@@ -1766,12 +1768,22 @@ static int detectBurst(signalVector &burst,
   /* Peak detection - place restrictions at correlation edges */
   *amp = fastPeakDetect(corr, toa);
 
-  if ((*toa < 3 * sps) || (*toa > len - 3 * sps))
-    return 0;
+  if ((*toa < 3 * sps) || (*toa > len - 3 * sps)) {
+    delete dec;
+    return -1.0f;
+  }
 
   /* Peak -to-average ratio */
-  if (computePeakRatio(&corr, sps, *toa, *amp) < thresh)
-    return 0;
+  float peak = computePeakRatio(&corr, sps, *toa, *amp);
+  if (peak < thresh) {
+    delete dec;
+    return -1.0f;
+  }
+
+  lte_dsock_send((float *) corr_in->begin(), corr_in->size(), 2);
+  lte_dsock_send((float *) corr.begin(), corr.size(), 3);
+
+  delete dec;
 
   /* Compute peak-to-average ratio. Reject if we don't have enough values */
   *amp = peakDetect(corr, toa, NULL);
@@ -1786,7 +1798,7 @@ static int detectBurst(signalVector &burst,
   /* Compensate for residuate time lag */
   *toa = *toa - sync->toa;
 
-  return 1;
+  return peak;
 }
 
 static float maxAmplitude(signalVector &burst)
@@ -1838,10 +1850,10 @@ int detectGeneralBurst(signalVector &rxBurst,
   len = head + tail;
   corr = new signalVector(len);
 
-  rc = detectBurst(rxBurst, *corr, sync,
+  float peak = detectBurst(rxBurst, *corr, sync,
                    thresh, sps, &amp, &toa, start, len);
   delete corr;
-
+#if 0
   if (rc < 0) {
     return -SIGERR_INTERNAL;
   } else if (!rc) {
@@ -1849,11 +1861,11 @@ int detectGeneralBurst(signalVector &rxBurst,
     toa = 0.0f;
     return clipping?-SIGERR_CLIP:SIGERR_NONE;
   }
-
+#endif
   /* Subtract forward search bits from delay */
   toa -= head;
 
-  return 1;
+  return peak;
 }
 
 
@@ -1880,10 +1892,14 @@ int detectRACHBurst(signalVector &rxBurst,
   tail = 8 + maxTOA;
   sync = gRACHSequence;
 
-  rc = detectGeneralBurst(rxBurst, thresh, sps, amp, toa,
+  float peak = detectGeneralBurst(rxBurst, thresh, sps, amp, toa,
                           target, head, tail, sync);
+  if (peak > 0) {
+    std::cout << "RACH: " << toa << ", " << peak;
+    return 1;
+  }
 
-  return rc;
+  return 0;
 }
 
 /* 
@@ -1904,13 +1920,19 @@ int analyzeTrafficBurst(signalVector &rxBurst, unsigned tsc, float thresh,
     return -SIGERR_UNSUPPORTED;
 
   target = 3 + 58 + 16 + 5;
-  head = 6;
-  tail = 6 + max_toa;
+  head = 10;
+  tail = 10 + max_toa;
   sync = gMidambles[tsc];
 
-  rc = detectGeneralBurst(rxBurst, thresh, sps, amp, toa,
+  float peak = detectGeneralBurst(rxBurst, thresh, sps, amp, toa,
                           target, head, tail, sync);
-  return rc;
+
+  if (peak > 0) {
+    std::cout << "NORM: " << toa << ", " << peak;
+    return 1;
+  }
+
+  return 0;
 }
 
 int detectEdgeBurst(signalVector &rxBurst, unsigned tsc, float thresh,
@@ -1927,22 +1949,29 @@ int detectEdgeBurst(signalVector &rxBurst, unsigned tsc, float thresh,
   tail = 6 + max_toa;
   sync = gEdgeMidambles[tsc];
 
-  rc = detectGeneralBurst(rxBurst, thresh, sps, amp, toa,
-                          target, head, tail, sync);
-  return rc;
+  float peak = detectGeneralBurst(rxBurst, thresh, sps, amp, toa,
+                                  target, head, tail, sync);
+  if (peak > 0) {
+//    std::cout << "EDGE: " << toa << ", " << peak << std::endl;
+    return 1;
+  }
+
+  return 0;
 }
 
 signalVector *downsampleBurst(signalVector &burst)
 {
-  signalVector *in, *out;
+  size_t ilen = DOWNSAMPLE_IN_LEN, olen = DOWNSAMPLE_OUT_LEN;
+  signalVector *dnsampler_in = new signalVector(DOWNSAMPLE_IN_LEN,
+                                                dnsampler->len());
 
-  in = new signalVector(DOWNSAMPLE_IN_LEN, dnsampler->len());
-  out = new signalVector(DOWNSAMPLE_OUT_LEN);
-  memcpy(in->begin(), burst.begin(), DOWNSAMPLE_IN_LEN * 2 * sizeof(float));
+  signalVector *out = new signalVector(olen);
+  memcpy(dnsampler_in->begin(), burst.begin(), ilen * 2 * sizeof(float));
 
-  dnsampler->rotate((float *) in->begin(), DOWNSAMPLE_IN_LEN,
-                    (float *) out->begin(), DOWNSAMPLE_OUT_LEN);
-  delete in;
+  dnsampler->rotate((float *) dnsampler_in->begin(), ilen,
+                    (float *) out->begin(), olen);
+
+  delete dnsampler_in;
   return out;
 };
 
@@ -2055,6 +2084,8 @@ SoftVector *demodulateBurst(signalVector &rxBurst, int sps,
 
   /* Shift up by a quarter of a frequency */
   GMSKReverseRotate(*dec, 1);
+  lte_dsock_send((float *) dec->begin(), dec->size(), 4);
+
   vectorSlicer(dec);
 
   bits = new SoftVector(dec->size());
@@ -2093,6 +2124,8 @@ SoftVector *demodEdgeBurst(signalVector &burst, int sps,
   /* Equalize and derotate */
   eq = convolve(dec, GSMPulse4->c0_inv, NULL, NO_DELAY);
   rot = derotateEdgeBurst(*eq, 1);
+
+  lte_dsock_send((float *) (rot->begin() + 3), 145, 5);
 
   /* Soft slice and normalize */
   bits = softSliceEdgeBurst(*rot);
